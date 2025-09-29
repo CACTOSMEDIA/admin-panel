@@ -3,7 +3,7 @@ import { supabaseServer } from '@/lib/supabaseServer';
 
 export const dynamic = 'force-dynamic';
 
-export async function GET(_req: NextRequest) {
+export async function GET() {
   const supabase = supabaseServer();
   const fmt = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Bogota', year:'numeric', month:'2-digit', day:'2-digit' });
   const [y, m, d] = fmt.format(new Date()).split('-').map(Number);

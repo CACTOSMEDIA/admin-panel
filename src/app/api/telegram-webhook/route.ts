@@ -1,5 +1,10 @@
+'use client';
+
 import { NextRequest, NextResponse } from 'next/server';
 import { supabaseServer } from '@/lib/supabaseServer';
+
+export const dynamic = 'force-dynamic';
+export const runtime = 'nodejs'; // asegura Node runtime
 
 // Helpers Telegram
 async function tgSend(chat_id: number | string, text: string, markup?: any) {
@@ -13,9 +18,9 @@ async function tgSend(chat_id: number | string, text: string, markup?: any) {
 
 async function tgGetFile(file_id: string) {
   const r = await fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/getFile?file_id=${file_id}`);
-  const j = await r.json();
-  if (!j.ok) throw new Error('getFile failed');
-  const path = j.result.file_path as string;
+  const j = await r.json() as { ok: boolean; result?: { file_path: string } };
+  if (!j.ok || !j.result) throw new Error('getFile failed');
+  const path = j.result.file_path;
   const url = `https://api.telegram.org/file/bot${process.env.TELEGRAM_BOT_TOKEN}/${path}`;
   const fileRes = await fetch(url);
   const buf = Buffer.from(await fileRes.arrayBuffer());
@@ -38,15 +43,13 @@ async function getCurrentRates(supabase: ReturnType<typeof supabaseServer>) {
   return data;
 }
 
-export const dynamic = 'force-dynamic';
-
 export async function POST(req: NextRequest) {
   const update = await req.json();
   const supabase = supabaseServer();
 
   // Quién habla
   const msg = update.message ?? update.edited_message ?? update.callback_query?.message;
-  const chatId = msg?.chat?.id;
+  const chatId: number | undefined = msg?.chat?.id;
   const from = update.message?.from ?? update.callback_query?.from;
   const tg_id = from?.id as number | undefined;
   const name = [from?.first_name, from?.last_name].filter(Boolean).join(' ') || from?.username || 'Usuario';
@@ -69,23 +72,23 @@ export async function POST(req: NextRequest) {
         .eq('active', true);
 
       if (!accs || accs.length === 0) {
-        await tgSend(chatId, 'No hay cuentas disponibles. Contacta soporte.');
+        if (chatId) await tgSend(chatId, 'No hay cuentas disponibles. Contacta soporte.');
         return NextResponse.json({ ok: true });
       }
       const keyboard = accs.map(a => [{ text: a.label ?? a.bank_name ?? 'Cuenta', callback_data: `RCV:${a.id}:${method}` }]);
-      await tgSend(chatId, 'Elige la cuenta destino para tu pago:', { inline_keyboard: keyboard });
+      if (chatId) await tgSend(chatId, 'Elige la cuenta destino para tu pago:', { inline_keyboard: keyboard });
       return NextResponse.json({ ok: true });
     }
 
     if (data.startsWith('RCV:')) {
       // callback data: RCV:<account_id>:<method>
       const [, accId, method] = data.split(':');
-      // Obtén última intención (monto y tipo) guardada en draft por este usuario
-      // Estrategia simple: busca última transacción PENDING creada en los últimos 30 min sin account asignada
+      // Última transacción PENDING sin cuenta asignada
+      const userRow = await supabase.from('users').select('id').eq('tg_id', tg_id!).maybeSingle();
       const { data: lastTx } = await supabase
         .from('transactions')
         .select('id')
-        .eq('user_id', (await supabase.from('users').select('id').eq('tg_id', tg_id!).maybeSingle()).data?.id)
+        .eq('user_id', userRow.data?.id)
         .eq('status','pending')
         .is('target_receive_account', null)
         .order('created_at', { ascending:false })
@@ -93,7 +96,7 @@ export async function POST(req: NextRequest) {
         .maybeSingle();
 
       if (!lastTx) {
-        await tgSend(chatId, 'No encontré una transacción pendiente. Inicia con /comprar o /vender.');
+        if (chatId) await tgSend(chatId, 'No encontré una transacción pendiente. Inicia con /comprar o /vender.');
         return NextResponse.json({ ok: true });
       }
 
@@ -108,7 +111,7 @@ export async function POST(req: NextRequest) {
           ? `Paga por *Zelle*\nUsuario: \`${acc?.zelle_user ?? '—'}\`\nTitular: *${acc?.zelle_holder ?? '—'}*\nMoneda: ${acc?.currency}`
           : `Transferencia bancaria\nBanco: *${acc?.bank_name ?? '—'}*\nCuenta: \`${acc?.account_number ?? '—'}\`\nMoneda: ${acc?.currency}`;
 
-      await tgSend(chatId, `${detail}\n\n*Sube tu captura de pago* (foto o PDF) en este chat.`);
+      if (chatId) await tgSend(chatId, `${detail}\n\n*Sube tu captura de pago* (foto o PDF) en este chat.`);
       return NextResponse.json({ ok: true });
     }
   }
@@ -116,7 +119,7 @@ export async function POST(req: NextRequest) {
   // 2) MENSAJES DE TEXTO (comandos)
   const text: string | undefined = update.message?.text;
   if (text && chatId) {
-    // /start (admite deep-link ref_XXX)
+    // /start
     if (text.startsWith('/start')) {
       await tgSend(chatId, '¡Bienvenido! Usa:\n/tasas – Ver tasas\n/comprar 100 – Cotiza para comprar USD\n/vender 120 – Cotiza para vender USD');
       return NextResponse.json({ ok: true });
@@ -139,7 +142,6 @@ export async function POST(req: NextRequest) {
       if (!isAdmin) { await tgSend(chatId, 'Solo admin.'); return NextResponse.json({ ok: true }); }
       const val = Number(text.split(' ')[1]);
       if (!val) { await tgSend(chatId, 'Uso: /set_compra 36.15'); return NextResponse.json({ ok: true }); }
-      // cierra vigente e inserta nueva con misma venta actual (si existe)
       const cur = await getCurrentRates(supabase);
       await supabase.from('rates').update({ valid_to: new Date().toISOString() }).is('valid_to', null);
       await supabase.from('rates').insert({ buy_rate: val, sell_rate: cur?.sell_rate ?? val + 0.5 });
@@ -166,9 +168,9 @@ export async function POST(req: NextRequest) {
       const r = await getCurrentRates(supabase);
       if (!r || !amount) { await tgSend(chatId, 'Uso: /comprar 100'); return NextResponse.json({ ok: true }); }
       const totalLocal = amount * Number(r.sell_rate); // vendes USD a tasa de venta
-      // crea draft/pending
       const u = await supabase.from('users').select('id').eq('tg_id', tg_id!).maybeSingle();
-      const { data: tx } = await supabase.from('transactions').insert({
+      // insert sin capturar resultado (evita var sin uso)
+      await supabase.from('transactions').insert({
         user_id: u.data?.id,
         type: 'SELL',                // negocio vende USD
         amount_currency: 'USD',
@@ -176,7 +178,7 @@ export async function POST(req: NextRequest) {
         rate_snapshot: r.sell_rate,
         method: 'bank',
         status: 'pending'
-      }).select('id').maybeSingle();
+      });
 
       await tgSend(chatId, `Total a pagar en moneda local: *${totalLocal.toFixed(2)}*.\nElige método:`, {
         inline_keyboard: [
@@ -246,9 +248,10 @@ export async function POST(req: NextRequest) {
 
       await tgSend(chatId, '✅ Recibimos tu captura. Pronto te confirmamos.');
       return NextResponse.json({ ok: true });
-    } catch (e: any) {
-      console.error(e);
-      await tgSend(chatId, '❌ Hubo un problema subiendo tu captura. Intenta de nuevo.');
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      console.error(msg);
+      await tgSend(chatId!, '❌ Hubo un problema subiendo tu captura. Intenta de nuevo.');
       return NextResponse.json({ ok: false });
     }
   }
