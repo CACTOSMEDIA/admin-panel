@@ -1,9 +1,8 @@
-'use client';
 import { NextRequest, NextResponse } from 'next/server';
 import { supabaseServer } from '@/lib/supabaseServer';
 
-export const dynamic = 'force-dynamic';
-export const runtime = 'nodejs'; // asegura Node runtime
+export const dynamic = 'force-dynamic'; // ✅ string, no función
+export const runtime = 'nodejs';        // ✅ string, no función
 
 // Helpers Telegram
 async function tgSend(chat_id: number | string, text: string, markup?: unknown) {
@@ -42,11 +41,8 @@ async function getCurrentRates(supabase: ReturnType<typeof supabaseServer>) {
   return data;
 }
 
-// Rango del día Bogotá (UTC)
 function bogotaDayRangeUTC(now = new Date()) {
-  const fmt = new Intl.DateTimeFormat('en-CA', {
-    timeZone: 'America/Bogota', year:'numeric', month:'2-digit', day:'2-digit'
-  });
+  const fmt = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Bogota', year:'numeric', month:'2-digit', day:'2-digit' });
   const [y, m, d] = fmt.format(now).split('-').map(Number);
   const startUTC = new Date(Date.UTC(y, m-1, d, 0, 0, 0)).toISOString();
   const endUTC   = new Date(Date.UTC(y, m-1, d+1, 0, 0, 0)).toISOString();
@@ -57,19 +53,17 @@ export async function POST(req: NextRequest) {
   const update = await req.json();
   const supabase = supabaseServer();
 
-  // Quién habla
   const msg = update.message ?? update.edited_message ?? update.callback_query?.message;
   const chatId: number | undefined = msg?.chat?.id;
   const from = update.message?.from ?? update.callback_query?.from;
   const tg_id = from?.id as number | undefined;
   const name = [from?.first_name, from?.last_name].filter(Boolean).join(' ') || from?.username || 'Usuario';
 
-  // upsert user
   if (tg_id) {
     await supabase.from('users').upsert({ tg_id, name, role: 'client' }, { onConflict: 'tg_id' });
   }
 
-  // 1) CALLBACKS (elige método/ cuenta)
+  // CALLBACKS
   if (update.callback_query) {
     const data: string = update.callback_query.data;
 
@@ -121,10 +115,9 @@ export async function POST(req: NextRequest) {
     }
   }
 
-  // 2) MENSAJES DE TEXTO (comandos)
+  // COMANDOS
   const text: string | undefined = update.message?.text;
   if (text && chatId) {
-    // /start: SALUDO SOLICITADO
     if (text.startsWith('/start')) {
       const welcome =
 `👋 *¡Bienvenido a tu Bot de Tasas!*
@@ -146,7 +139,6 @@ Con este bot podrás:
       return NextResponse.json({ ok: true });
     }
 
-    // /help: misma ayuda que /start
     if (text.startsWith('/help')) {
       const help =
 `👋 *Ayuda*
@@ -161,7 +153,6 @@ Con este bot podrás:
       return NextResponse.json({ ok: true });
     }
 
-    // /cierre: resumen del día (Bogotá)
     if (text.startsWith('/cierre')) {
       const { startUTC, endUTC } = bogotaDayRangeUTC(new Date());
       const { data: txs, error } = await supabase
@@ -195,14 +186,12 @@ Rango: ${startUTC} → ${endUTC} (UTC)`;
       return NextResponse.json({ ok: true });
     }
 
-    // /tasas
     if (text.startsWith('/tasas')) {
       const r = await getCurrentRates(supabase);
       await tgSend(chatId, r ? `Tasas actuales:\nCompra: *${r.buy_rate}*\nVenta: *${r.sell_rate}*` : 'Aún no hay tasas activas. (Admin: usa /set_compra y /set_venta)');
       return NextResponse.json({ ok: true });
     }
 
-    // /set_compra X.YY  (solo admin)
     if (text.startsWith('/set_compra')) {
       const isAdmin = (await supabase.from('users').select('role').eq('tg_id', tg_id!).maybeSingle()).data?.role === 'admin';
       if (!isAdmin) { await tgSend(chatId, 'Solo admin.'); return NextResponse.json({ ok: true }); }
@@ -215,7 +204,6 @@ Rango: ${startUTC} → ${endUTC} (UTC)`;
       return NextResponse.json({ ok: true });
     }
 
-    // /set_venta X.YY  (solo admin)
     if (text.startsWith('/set_venta')) {
       const isAdmin = (await supabase.from('users').select('role').eq('tg_id', tg_id!).maybeSingle()).data?.role === 'admin';
       if (!isAdmin) { await tgSend(chatId, 'Solo admin.'); return NextResponse.json({ ok: true }); }
@@ -228,23 +216,21 @@ Rango: ${startUTC} → ${endUTC} (UTC)`;
       return NextResponse.json({ ok: true });
     }
 
-    // /comprar 100  (cliente quiere COMPRAR USD → tú VENDES USD)
     if (text.startsWith('/comprar')) {
       const amount = Number(text.split(' ')[1]);
       const r = await getCurrentRates(supabase);
       if (!r || !amount) { await tgSend(chatId, 'Uso: /comprar 100'); return NextResponse.json({ ok: true }); }
-      const totalLocal = amount * Number(r.sell_rate); // vendes USD a tasa de venta
+      const totalLocal = amount * Number(r.sell_rate);
       const u = await supabase.from('users').select('id').eq('tg_id', tg_id!).maybeSingle();
       await supabase.from('transactions').insert({
         user_id: u.data?.id,
-        type: 'SELL',                // negocio vende USD
+        type: 'SELL', // negocio vende USD
         amount_currency: 'USD',
         amount_value: amount,
         rate_snapshot: r.sell_rate,
         method: 'bank',
         status: 'pending'
       });
-
       await tgSend(chatId, `Total a pagar en moneda local: *${totalLocal.toFixed(2)}*.\nElige método:`, {
         inline_keyboard: [
           [{ text: 'Transferencia bancaria', callback_data: 'METHOD:bank' }],
@@ -254,23 +240,21 @@ Rango: ${startUTC} → ${endUTC} (UTC)`;
       return NextResponse.json({ ok: true });
     }
 
-    // /vender 120  (cliente quiere VENDER USD → tú COMPRAS USD)
     if (text.startsWith('/vender')) {
       const amount = Number(text.split(' ')[1]);
       const r = await getCurrentRates(supabase);
       if (!r || !amount) { await tgSend(chatId, 'Uso: /vender 120'); return NextResponse.json({ ok: true }); }
-      const totalLocal = amount * Number(r.buy_rate); // compras USD a tasa de compra
+      const totalLocal = amount * Number(r.buy_rate);
       const u = await supabase.from('users').select('id').eq('tg_id', tg_id!).maybeSingle();
       await supabase.from('transactions').insert({
         user_id: u.data?.id,
-        type: 'BUY',                 // negocio compra USD
+        type: 'BUY', // negocio compra USD
         amount_currency: 'USD',
         amount_value: amount,
         rate_snapshot: r.buy_rate,
         method: 'bank',
         status: 'pending'
       });
-
       await tgSend(chatId, `Te pagaremos *${totalLocal.toFixed(2)}* en moneda local.\nElige método:`, {
         inline_keyboard: [
           [{ text: 'Transferencia bancaria', callback_data: 'METHOD:bank' }],
@@ -281,9 +265,9 @@ Rango: ${startUTC} → ${endUTC} (UTC)`;
     }
   }
 
-  // 3) CAPTURA (photo/document)
-  const photo = update.message?.photo?.pop(); // última resolución
-  const document = update.message?.document;  // pdf
+  // CAPTURA
+  const photo = update.message?.photo?.pop();
+  const document = update.message?.document;
   if ((photo || document) && chatId && tg_id) {
     const file_id = photo?.file_id ?? document?.file_id;
     try {
@@ -311,7 +295,7 @@ Rango: ${startUTC} → ${endUTC} (UTC)`;
 
       await tgSend(chatId, '✅ Recibimos tu captura. Pronto te confirmamos.');
       return NextResponse.json({ ok: true });
-    } catch (e: unknown) {
+    } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       console.error(msg);
       await tgSend(chatId!, '❌ Hubo un problema subiendo tu captura. Intenta de nuevo.');
