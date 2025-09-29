@@ -1,5 +1,4 @@
 'use client';
-
 import { NextRequest, NextResponse } from 'next/server';
 import { supabaseServer } from '@/lib/supabaseServer';
 
@@ -7,7 +6,7 @@ export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs'; // asegura Node runtime
 
 // Helpers Telegram
-async function tgSend(chat_id: number | string, text: string, markup?: any) {
+async function tgSend(chat_id: number | string, text: string, markup?: unknown) {
   const res = await fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
     method: 'POST',
     headers: { 'content-type':'application/json' },
@@ -18,20 +17,20 @@ async function tgSend(chat_id: number | string, text: string, markup?: any) {
 
 async function tgGetFile(file_id: string) {
   const r = await fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/getFile?file_id=${file_id}`);
-  const j = await r.json() as { ok: boolean; result?: { file_path: string } };
+  const j: { ok: boolean; result?: { file_path: string } } = await r.json();
   if (!j.ok || !j.result) throw new Error('getFile failed');
   const path = j.result.file_path;
   const url = `https://api.telegram.org/file/bot${process.env.TELEGRAM_BOT_TOKEN}/${path}`;
   const fileRes = await fetch(url);
   const buf = Buffer.from(await fileRes.arrayBuffer());
-  // content-type aproximado
-  const mime = path.endsWith('.pdf') ? 'application/pdf'
-    : path.endsWith('.png') ? 'image/png'
-    : 'image/jpeg';
+  const mime =
+    path.endsWith('.pdf') ? 'application/pdf' :
+    path.endsWith('.png') ? 'image/png' :
+    'image/jpeg';
   return { buf, mime };
 }
 
-// Utilidades de DB
+// DB utils
 async function getCurrentRates(supabase: ReturnType<typeof supabaseServer>) {
   const { data } = await supabase
     .from('rates')
@@ -41,6 +40,17 @@ async function getCurrentRates(supabase: ReturnType<typeof supabaseServer>) {
     .limit(1)
     .maybeSingle();
   return data;
+}
+
+// Rango del día Bogotá (UTC)
+function bogotaDayRangeUTC(now = new Date()) {
+  const fmt = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'America/Bogota', year:'numeric', month:'2-digit', day:'2-digit'
+  });
+  const [y, m, d] = fmt.format(now).split('-').map(Number);
+  const startUTC = new Date(Date.UTC(y, m-1, d, 0, 0, 0)).toISOString();
+  const endUTC   = new Date(Date.UTC(y, m-1, d+1, 0, 0, 0)).toISOString();
+  return { startUTC, endUTC };
 }
 
 export async function POST(req: NextRequest) {
@@ -54,7 +64,7 @@ export async function POST(req: NextRequest) {
   const tg_id = from?.id as number | undefined;
   const name = [from?.first_name, from?.last_name].filter(Boolean).join(' ') || from?.username || 'Usuario';
 
-  // Asegura usuario en DB
+  // upsert user
   if (tg_id) {
     await supabase.from('users').upsert({ tg_id, name, role: 'client' }, { onConflict: 'tg_id' });
   }
@@ -62,11 +72,9 @@ export async function POST(req: NextRequest) {
   // 1) CALLBACKS (elige método/ cuenta)
   if (update.callback_query) {
     const data: string = update.callback_query.data;
-    // form: METHOD:bank | METHOD:zelle
-    // form: RCV:<receive_account_id>
+
     if (data.startsWith('METHOD:')) {
       const method = data.split(':')[1]; // bank|zelle
-      // listar cuentas del negocio
       const { data: accs } = await supabase.from('receive_accounts')
         .select('id,label,bank_name,account_number,zelle_user,zelle_holder,currency,active')
         .eq('active', true);
@@ -81,9 +89,7 @@ export async function POST(req: NextRequest) {
     }
 
     if (data.startsWith('RCV:')) {
-      // callback data: RCV:<account_id>:<method>
       const [, accId, method] = data.split(':');
-      // Última transacción PENDING sin cuenta asignada
       const userRow = await supabase.from('users').select('id').eq('tg_id', tg_id!).maybeSingle();
       const { data: lastTx } = await supabase
         .from('transactions')
@@ -104,7 +110,6 @@ export async function POST(req: NextRequest) {
         .update({ method, target_receive_account: accId })
         .eq('id', lastTx.id);
 
-      // Muestra datos de la cuenta seleccionada
       const { data: acc } = await supabase.from('receive_accounts').select('*').eq('id', accId).maybeSingle();
       const detail =
         method === 'zelle'
@@ -119,20 +124,81 @@ export async function POST(req: NextRequest) {
   // 2) MENSAJES DE TEXTO (comandos)
   const text: string | undefined = update.message?.text;
   if (text && chatId) {
-    // /start
+    // /start: SALUDO SOLICITADO
     if (text.startsWith('/start')) {
-      await tgSend(chatId, '¡Bienvenido! Usa:\n/tasas – Ver tasas\n/comprar 100 – Cotiza para comprar USD\n/vender 120 – Cotiza para vender USD');
+      const welcome =
+`👋 *¡Bienvenido a tu Bot de Tasas!*
+
+Con este bot podrás:
+💱 Consultar tasas de compra y venta
+📊 Ver el cierre diario
+⚙️ Fijar tus propias tasas de referencia
+
+*Comandos disponibles:*
+/tasas - Ver tasas actuales
+/cierre - Ver cierre diario
+/set_compra - Fijar tasa de compra
+/set_venta - Fijar tasa de venta
+/help - Mostrar ayuda
+
+✨ Usa los comandos desde el menú o escríbelos directamente.`;
+      await tgSend(chatId, welcome);
+      return NextResponse.json({ ok: true });
+    }
+
+    // /help: misma ayuda que /start
+    if (text.startsWith('/help')) {
+      const help =
+`👋 *Ayuda*
+
+/tasas - Ver tasas actuales
+/cierre - Ver cierre diario
+/set_compra - Fijar tasa de compra (admin)
+/set_venta - Fijar tasa de venta (admin)
+
+✨ Usa los comandos desde el menú o escríbelos directamente.`;
+      await tgSend(chatId, help);
+      return NextResponse.json({ ok: true });
+    }
+
+    // /cierre: resumen del día (Bogotá)
+    if (text.startsWith('/cierre')) {
+      const { startUTC, endUTC } = bogotaDayRangeUTC(new Date());
+      const { data: txs, error } = await supabase
+        .from('transactions')
+        .select('type,amount_value')
+        .gte('created_at', startUTC)
+        .lt('created_at',  endUTC);
+
+      if (error) {
+        await tgSend(chatId, 'No pude calcular el cierre. Intenta de nuevo.');
+        return NextResponse.json({ ok: true });
+      }
+
+      let compras = 0, ventas = 0;
+      for (const t of txs ?? []) {
+        if (t.type === 'BUY')  compras += Number(t.amount_value);
+        if (t.type === 'SELL') ventas  += Number(t.amount_value);
+      }
+      const n = txs?.length ?? 0;
+      const gan = ventas - compras;
+
+      const textResp =
+`🧾 *Cierre diario* (hora Bogotá)
+Transacciones: ${n}
+Inversión (compras): ${compras.toLocaleString('en-US')}
+Ventas: ${ventas.toLocaleString('en-US')}
+Ganancia aprox.: ${gan.toLocaleString('en-US')}
+
+Rango: ${startUTC} → ${endUTC} (UTC)`;
+      await tgSend(chatId, textResp);
       return NextResponse.json({ ok: true });
     }
 
     // /tasas
     if (text.startsWith('/tasas')) {
       const r = await getCurrentRates(supabase);
-      if (!r) {
-        await tgSend(chatId, 'Aún no hay tasas activas. (Admin: usa /set_compra y /set_venta)');
-      } else {
-        await tgSend(chatId, `Tasas actuales:\nCompra: *${r.buy_rate}*\nVenta: *${r.sell_rate}*`);
-      }
+      await tgSend(chatId, r ? `Tasas actuales:\nCompra: *${r.buy_rate}*\nVenta: *${r.sell_rate}*` : 'Aún no hay tasas activas. (Admin: usa /set_compra y /set_venta)');
       return NextResponse.json({ ok: true });
     }
 
@@ -169,7 +235,6 @@ export async function POST(req: NextRequest) {
       if (!r || !amount) { await tgSend(chatId, 'Uso: /comprar 100'); return NextResponse.json({ ok: true }); }
       const totalLocal = amount * Number(r.sell_rate); // vendes USD a tasa de venta
       const u = await supabase.from('users').select('id').eq('tg_id', tg_id!).maybeSingle();
-      // insert sin capturar resultado (evita var sin uso)
       await supabase.from('transactions').insert({
         user_id: u.data?.id,
         type: 'SELL',                // negocio vende USD
@@ -223,7 +288,6 @@ export async function POST(req: NextRequest) {
     const file_id = photo?.file_id ?? document?.file_id;
     try {
       const { buf, mime } = await tgGetFile(file_id);
-      // buscar última tx pendiente sin recibo asignado
       const u = await supabase.from('users').select('id').eq('tg_id', tg_id).maybeSingle();
       const { data: tx } = await supabase
         .from('transactions')
@@ -238,7 +302,6 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ ok: true });
       }
 
-      // Subir a Storage + insertar en receipts
       const ext = mime === 'application/pdf' ? 'pdf' : 'jpg';
       const path = `tx/${tx.id}/${Date.now()}.${ext}`;
       const supa = supabaseServer();
