@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/Button";
 export default function Home() {
   return (
     <main className="p-8 space-y-6">
-      <h1 className="text-2xl font-semibold">Panel Admin — FX</h1>
+      <h1 className="text-2xl font-semibold">Tasas-Cactos — FX</h1>
       <p className="text-sm opacity-70">Next.js + Supabase listo para conectar.</p>
 
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
